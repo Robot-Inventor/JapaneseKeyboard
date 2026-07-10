@@ -1,6 +1,7 @@
 package com.kazumaproject.markdownhelperkeyboard.converter.path_algorithm
 
 import com.kazumaproject.graph.Node
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,7 +10,7 @@ import kotlin.system.measureNanoTime
 class NgramRuleScorerTest {
 
     @Test
-    fun conversion_prioritizesIkideInasena_whenTwoNodeRuleAdded() {
+    fun conversion_prioritizesIkideInasena_whenTwoNodeRuleAdded() = runBlocking {
         val connectionIds = createConnectionIds()
 
         val noRuleFindPath = FindPath(
@@ -233,7 +234,7 @@ class NgramRuleScorerTest {
         }
     }
 
-    private fun benchmarkConversionScaling(mode: BenchmarkMode): List<Pair<Int, Long>> {
+    private fun benchmarkConversionScaling(mode: BenchmarkMode): List<Pair<Int, Long>> = runBlocking {
         val ruleCounts = listOf(0, 10, 100, 500, 1000)
         val warmupIterations = 100
         val measureIterations = 400

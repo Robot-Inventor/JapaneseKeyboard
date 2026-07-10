@@ -16,6 +16,8 @@ import com.kazumaproject.markdownhelperkeyboard.converter.trace.BoundaryTrace
 import com.kazumaproject.markdownhelperkeyboard.converter.trace.CandidateTrace
 import com.kazumaproject.markdownhelperkeyboard.converter.trace.ForwardDpTrace
 import com.kazumaproject.markdownhelperkeyboard.converter.trace.PenaltyTrace
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import timber.log.Timber
 import java.util.PriorityQueue
 
@@ -39,6 +41,8 @@ class FindPath(
 
     companion object {
         private val defaultNgramRuleScorer: NgramRuleScorer = NgramRuleScorer.createDefault()
+        private const val CANCELLATION_CHECK_INTERVAL = 128
+        private const val DP_CANCELLATION_CHECK_INTERVAL = 256
     }
 
     private var forwardDpTraceSink: MutableList<ForwardDpTrace>? = null
@@ -51,7 +55,7 @@ class FindPath(
         this.mozcBoundaryModeProvider = mozcBoundaryModeProvider
     }
 
-    fun backwardAStar(
+    suspend fun backwardAStar(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionIds: ShortArray,
@@ -66,13 +70,14 @@ class FindPath(
         beamWidth = beamWidth,
     )
 
-    fun backwardAStar(
+    suspend fun backwardAStar(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionMatrix: ConnectionMatrix.CostTable,
         n: Int,
         beamWidth: Int = 20,
     ): MutableList<Candidate> {
+        val cancellationContext = currentCoroutineContext()
         forwardDp(
             graph = graph,
             length = length,
@@ -95,7 +100,10 @@ class FindPath(
         val eos = Pair(graph[length + 1]?.get(0) ?: return resultFinal, 0)
         pQueue.add(eos)
 
+        var queueIterations = 0
+        var prevNodeCount = 0
         while (pQueue.isNotEmpty()) {
+            if (queueIterations++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
             val node = pQueue.poll() ?: break
 
             if (node.first.tango == "BOS") {
@@ -134,6 +142,7 @@ class FindPath(
                 )
 
                 for (prevNode in prevNodes) {
+                    if (prevNodeCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     val edgeScore = getEdgeCost(
                         rid = prevNode.r.toInt(),
                         lid = node.first.l.toInt(),
@@ -157,13 +166,16 @@ class FindPath(
         return resultFinal
     }
 
-    private fun forwardDp(
+    private suspend fun forwardDp(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionMatrix: ConnectionMatrix.CostTable,
         beamWidth: Int = 20,
     ) {
+        val cancellationContext = currentCoroutineContext()
+        var edgeCount = 0
         for (i in 1..length + 1) {
+            cancellationContext.ensureActive()
             val nodes = graph[i] ?: continue
 
             for (node in nodes) {
@@ -173,6 +185,7 @@ class FindPath(
                 val prevNodes = getPrevNodes(graph, node, i)
 
                 for (prev in prevNodes) {
+                    if (edgeCount++ % DP_CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     val edgeCost = getEdgeCost(
                         rid = prev.r.toInt(),
                         lid = node.l.toInt(),
@@ -192,32 +205,43 @@ class FindPath(
             val traceSink = forwardDpTraceSink
             val beforePruning = traceSink?.let { nodes.toList() }
             if (i <= length && nodes.size > beamWidth) {
+                cancellationContext.ensureActive()
                 nodes.sortBy { it.f }
+                cancellationContext.ensureActive()
                 graph[i] = nodes.take(beamWidth).toMutableList()
             }
-            traceSink?.add(
-                ForwardDpTrace(
-                    position = i,
-                    nodeCountBeforePruning = beforePruning?.size ?: nodes.size,
-                    nodeCountAfterPruning = graph[i]?.size ?: nodes.size,
-                    keptNodes = (graph[i] ?: nodes).map { it.tango },
-                    droppedNodes = if (beforePruning != null && i <= length && beforePruning.size > beamWidth) {
-                        beforePruning.sortedBy { it.f }.drop(beamWidth).map { it.tango }
-                    } else {
-                        emptyList()
-                    },
-                ),
-            )
+            if (traceSink != null) {
+                val droppedNodes = if (beforePruning != null && i <= length && beforePruning.size > beamWidth) {
+                    cancellationContext.ensureActive()
+                    val dropped = beforePruning.sortedBy { it.f }.drop(beamWidth).map { it.tango }
+                    cancellationContext.ensureActive()
+                    dropped
+                } else {
+                    emptyList()
+                }
+                traceSink.add(
+                    ForwardDpTrace(
+                        position = i,
+                        nodeCountBeforePruning = beforePruning?.size ?: nodes.size,
+                        nodeCountAfterPruning = graph[i]?.size ?: nodes.size,
+                        keptNodes = (graph[i] ?: nodes).map { it.tango },
+                        droppedNodes = droppedNodes,
+                    ),
+                )
+            }
         }
     }
 
-    private fun forwardDpWithLog(
+    private suspend fun forwardDpWithLog(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionMatrix: ConnectionMatrix.CostTable,
         beamWidth: Int = 20,
     ) {
+        val cancellationContext = currentCoroutineContext()
+        var edgeCount = 0
         for (i in 1..length + 1) {
+            cancellationContext.ensureActive()
             val nodes = graph[i] ?: continue
 
             for (node in nodes) {
@@ -227,6 +251,7 @@ class FindPath(
                 val prevNodes = getPrevNodes(graph, node, i)
 
                 for (prev in prevNodes) {
+                    if (edgeCount++ % DP_CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     val edgeCost = getEdgeCost(
                         rid = prev.r.toInt(),
                         lid = node.l.toInt(),
@@ -245,7 +270,9 @@ class FindPath(
 
             if (i <= length && nodes.size > beamWidth) {
                 val originalNodeCount = nodes.size
+                cancellationContext.ensureActive()
                 nodes.sortBy { it.f }
+                cancellationContext.ensureActive()
                 val prunedNodes = nodes.take(beamWidth).toMutableList()
                 graph[i] = prunedNodes
                 Timber.d("    - forwardDp 枝刈り @位置$i: $originalNodeCount -> ${prunedNodes.size} ノード")
@@ -323,7 +350,7 @@ class FindPath(
         return result.dropLast(1).joinToString("")
     }
 
-    fun backwardAStarWithBunsetsu(
+    suspend fun backwardAStarWithBunsetsu(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionIds: ShortArray,
@@ -346,7 +373,7 @@ class FindPath(
         candidateTrace = candidateTrace,
     )
 
-    fun backwardAStarWithBunsetsu(
+    suspend fun backwardAStarWithBunsetsu(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionMatrix: ConnectionMatrix.CostTable,
@@ -357,6 +384,7 @@ class FindPath(
         boundaryTrace: MutableList<BoundaryTrace>? = null,
         candidateTrace: MutableList<CandidateTrace>? = null,
     ): BunsetsuCandidateResult {
+        val cancellationContext = currentCoroutineContext()
         val mozcSegmenter = mozcSegmenterProvider()
         if (mozcSegmenter != null) {
             applyMozcPrefixSuffixPenalty(
@@ -412,7 +440,10 @@ class FindPath(
         }
             ?: return BunsetsuCandidateResult(emptyList(), emptyList())
 
+        var queueIterations = 0
+        var prevNodeCount = 0
         while (pQueue.isNotEmpty()) {
+            if (queueIterations++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
             val element = pQueue.poll() ?: break
             val currentNode = element.node
 
@@ -471,6 +502,7 @@ class FindPath(
                 )
 
                 for (prevNode in prevNodes) {
+                    if (prevNodeCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     if (boundaryChecker != null) {
                         val isEdge = prevNode.mozcNodeType == MozcNodeType.BOS ||
                             currentNode.mozcNodeType == MozcNodeType.EOS
@@ -526,14 +558,17 @@ class FindPath(
             }
         }
 
+        cancellationContext.ensureActive()
+        val sortedCandidates = resultFinal.sortedBy { it.score }
+        cancellationContext.ensureActive()
         return BunsetsuCandidateResult(
-            candidates = resultFinal.sortedBy { it.score },
+            candidates = sortedCandidates,
             splitPatterns = splitPatterns,
             splitPatternByCandidateString = splitPatternByCandidateString,
         )
     }
 
-    fun backwardAStarWithBunsetsuWithLog(
+    suspend fun backwardAStarWithBunsetsuWithLog(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionIds: ShortArray,
@@ -548,13 +583,14 @@ class FindPath(
         beamWidth = beamWidth,
     )
 
-    fun backwardAStarWithBunsetsuWithLog(
+    suspend fun backwardAStarWithBunsetsuWithLog(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         connectionMatrix: ConnectionMatrix.CostTable,
         n: Int,
         beamWidth: Int = 20,
     ): Pair<List<Candidate>, List<Int>> {
+        val cancellationContext = currentCoroutineContext()
         val totalStartTime = System.currentTimeMillis()
         Timber.d("▼ backwardAStarWithBunsetsu 開始 (入力長: $length)")
 
@@ -591,7 +627,10 @@ class FindPath(
         var loopCount = 0
         var maxQueueSize = 0
 
+        var queueIterations = 0
+        var prevNodeCount = 0
         while (pQueue.isNotEmpty()) {
+            if (queueIterations++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
             loopCount++
             maxQueueSize = maxOf(maxQueueSize, pQueue.size)
 
@@ -644,6 +683,7 @@ class FindPath(
                 )
 
                 for (prevNode in prevNodes) {
+                    if (prevNodeCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     val edgeScore = getEdgeCost(
                         rid = prevNode.r.toInt(),
                         lid = node.first.l.toInt(),
@@ -671,48 +711,56 @@ class FindPath(
         Timber.d("  │  └─ pQueue最大サイズ: $maxQueueSize")
         Timber.d("▼ backwardAStarWithBunsetsu 完了 (全体: ${totalTime}ms)")
 
-        return Pair(resultFinal.sortedBy { it.score }, bestBunsetsuPositions)
+        cancellationContext.ensureActive()
+        val sortedCandidates = resultFinal.sortedBy { it.score }
+        cancellationContext.ensureActive()
+        return Pair(sortedCandidates, bestBunsetsuPositions)
     }
 
-    private fun applyMozcPrefixSuffixPenalty(
+    private suspend fun applyMozcPrefixSuffixPenalty(
         graph: MutableMap<Int, MutableList<Node>>,
         length: Int,
         segmenter: MozcSegmenter,
         trace: MutableList<PenaltyTrace>?,
     ) {
-        graph.values.flatten().forEach { node ->
-            if (node.mozcNodeType != MozcNodeType.NOR) {
-                node.adjustedScore = node.score
-                return@forEach
-            }
+        val cancellationContext = currentCoroutineContext()
+        var nodeCount = 0
+        for (nodes in graph.values) {
+            for (node in nodes) {
+                if (nodeCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
+                if (node.mozcNodeType != MozcNodeType.NOR) {
+                    node.adjustedScore = node.score
+                    continue
+                }
 
-            val prefixPenalty = if (node.sPos == 0) {
-                segmenter.getPrefixPenalty(node.l.toInt())
-            } else {
-                0
-            }
-            val suffixPenalty = if (node.sPos + node.len.toInt() == length) {
-                segmenter.getSuffixPenalty(node.r.toInt())
-            } else {
-                0
-            }
+                val prefixPenalty = if (node.sPos == 0) {
+                    segmenter.getPrefixPenalty(node.l.toInt())
+                } else {
+                    0
+                }
+                val suffixPenalty = if (node.sPos + node.len.toInt() == length) {
+                    segmenter.getSuffixPenalty(node.r.toInt())
+                } else {
+                    0
+                }
 
-            node.adjustedScore = node.score + prefixPenalty + suffixPenalty
-            if (prefixPenalty != 0 || suffixPenalty != 0) {
-                trace?.add(
-                    PenaltyTrace(
-                        tango = node.tango,
-                        yomiUsed = node.yomiUsed,
-                        startPos = node.sPos,
-                        endPos = node.sPos + node.len.toInt(),
-                        leftId = node.l.toInt(),
-                        rightId = node.r.toInt(),
-                        baseCost = node.score,
-                        prefixPenalty = prefixPenalty,
-                        suffixPenalty = suffixPenalty,
-                        adjustedCost = node.adjustedScore,
-                    ),
-                )
+                node.adjustedScore = node.score + prefixPenalty + suffixPenalty
+                if (prefixPenalty != 0 || suffixPenalty != 0) {
+                    trace?.add(
+                        PenaltyTrace(
+                            tango = node.tango,
+                            yomiUsed = node.yomiUsed,
+                            startPos = node.sPos,
+                            endPos = node.sPos + node.len.toInt(),
+                            leftId = node.l.toInt(),
+                            rightId = node.r.toInt(),
+                            baseCost = node.score,
+                            prefixPenalty = prefixPenalty,
+                            suffixPenalty = suffixPenalty,
+                            adjustedCost = node.adjustedScore,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -849,4 +897,5 @@ class FindPath(
             else -> false
         }
     }
+
 }

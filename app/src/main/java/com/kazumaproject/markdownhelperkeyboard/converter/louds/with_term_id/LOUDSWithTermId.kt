@@ -21,6 +21,8 @@ import com.kazumaproject.toByteArray
 import com.kazumaproject.toByteArrayFromListChar
 import com.kazumaproject.toListChar
 import com.kazumaproject.toListInt
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.IOException
 import java.io.ObjectInput
 import java.io.ObjectOutput
@@ -28,6 +30,10 @@ import java.util.BitSet
 
 
 class LOUDSWithTermId {
+
+    private companion object {
+        const val CANCELLATION_CHECK_INTERVAL = 64
+    }
 
     data class CommonPrefixSearchResult(
         val yomi: String,
@@ -337,17 +343,25 @@ class LOUDSWithTermId {
         pos: Int,
         prefix: StringBuilder,
         succinctBitVector: SuccinctBitVector,
-        result: MutableList<String>
+        result: MutableList<String>,
+        cancellationContext: kotlin.coroutines.CoroutineContext,
+        operationCount: IntArray,
     ) {
+        if (operationCount[0]++ % CANCELLATION_CHECK_INTERVAL == 0) {
+            cancellationContext.ensureActive()
+        }
         if (isLeaf[pos]) {
             result.add(prefix.toString())
         }
         var childPos = firstChild(pos, succinctBitVector)
         while (childPos >= 0 && LBS[childPos]) {
+            if (operationCount[0]++ % CANCELLATION_CHECK_INTERVAL == 0) {
+                cancellationContext.ensureActive()
+            }
             val index = succinctBitVector.rank1(childPos)
             if (index >= labels.size) break
             prefix.append(labels[index])
-            collectWords(childPos, prefix, succinctBitVector, result)
+            collectWords(childPos, prefix, succinctBitVector, result, cancellationContext, operationCount)
             prefix.deleteCharAt(prefix.length - 1)
             childPos++
         }
@@ -369,11 +383,16 @@ class LOUDSWithTermId {
         return result
     }
 
-    fun predictiveSearch(prefix: String, succinctBitVector: SuccinctBitVector): List<String> {
+    suspend fun predictiveSearch(prefix: String, succinctBitVector: SuccinctBitVector): List<String> {
+        val cancellationContext = currentCoroutineContext()
+        val operationCount = intArrayOf(0)
         val result = mutableListOf<String>()
         val resultTemp = StringBuilder()
         var n = 0
         for (c in prefix) {
+            if (operationCount[0]++ % CANCELLATION_CHECK_INTERVAL == 0) {
+                cancellationContext.ensureActive()
+            }
             n = traverse(n, c, succinctBitVector)
             if (n < 0) return result // No match found
             val index = succinctBitVector.rank1(n)
@@ -381,7 +400,7 @@ class LOUDSWithTermId {
             resultTemp.append(labels[index])
         }
         // Collect all words starting from the last matched node
-        collectWords(n, resultTemp, succinctBitVector, result)
+        collectWords(n, resultTemp, succinctBitVector, result, cancellationContext, operationCount)
         return result
     }
 
@@ -606,13 +625,17 @@ class LOUDSWithTermId {
      *
      * @return OmissionSearchResultのリスト。省略が発生したかのフラグを含む。
      */
-    fun commonPrefixSearchWithOmission(
+    suspend fun commonPrefixSearchWithOmission(
         str: String, succinctBitVector: SuccinctBitVector
     ): List<OmissionSearchResult> { // ★ 戻り値を List<String> から List<OmissionSearchResult> に変更
         val results =
             mutableSetOf<OmissionSearchResult>() // ★ 型を MutableSet<OmissionSearchResult> に変更
+        val cancellationContext = currentCoroutineContext()
+        val operationCount = intArrayOf(0)
         // ★ 5番目の引数として「省略発生フラグ」の初期値 false を渡す
-        searchRecursiveWithOmission(str, 0, 0, "", false, results, succinctBitVector)
+        searchRecursiveWithOmission(
+            str, 0, 0, "", false, results, succinctBitVector, cancellationContext, operationCount,
+        )
         return results.toList()
     }
 
@@ -628,8 +651,11 @@ class LOUDSWithTermId {
         currentYomi: String,
         omissionOccurred: Boolean, // ★「省略発生フラグ」を引数に追加
         results: MutableSet<OmissionSearchResult>, // ★ 型を OmissionSearchResult に変更
-        succinctBitVector: SuccinctBitVector
+        succinctBitVector: SuccinctBitVector,
+        cancellationContext: kotlin.coroutines.CoroutineContext,
+        operationCount: IntArray,
     ) {
+        if (operationCount[0]++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
         if (isLeaf[currentNodeIndex]) {
             // ★ OmissionSearchResult オブジェクトを追加
             results.add(OmissionSearchResult(currentYomi, omissionOccurred))
@@ -648,6 +674,7 @@ class LOUDSWithTermId {
 
             var childPos = firstChild(currentNodeIndex, succinctBitVector)
             while (childPos >= 0 && LBS[childPos]) {
+                if (operationCount[0]++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                 val labelNodeId = succinctBitVector.rank1(childPos)
                 if (labelNodeId < labels.size && labels[labelNodeId] == variant) {
 
@@ -658,7 +685,9 @@ class LOUDSWithTermId {
                         currentYomi + variant,
                         newOmissionOccurred, // ★ 更新したフラグを再帰呼び出しに渡す
                         results,
-                        succinctBitVector
+                        succinctBitVector,
+                        cancellationContext,
+                        operationCount,
                     )
                     break
                 }
@@ -708,7 +737,7 @@ class LOUDSWithTermId {
         }
     }
 
-    fun commonPrefixSearchWithTypoCorrectionPrefix(
+    suspend fun commonPrefixSearchWithTypoCorrectionPrefix(
         str: String,
         succinctBitVector: SuccinctBitVector,
         maxPenalty: Int = 2,
@@ -719,6 +748,8 @@ class LOUDSWithTermId {
         // 同一yomiの重複を最小penaltyで集約
         val bestPenaltyByYomi = HashMap<String, Int>(128)
         val sb = StringBuilder(maxLen)
+        val cancellationContext = currentCoroutineContext()
+        var operationCount = 0
 
         fun acceptIfLeaf(nodeIndex: Int, penaltyUsed: Int) {
             if (sb.isEmpty()) return
@@ -732,6 +763,7 @@ class LOUDSWithTermId {
         }
 
         fun dfs(strIndex: Int, nodeIndex: Int, penaltyUsed: Int) {
+            if (operationCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
             if (penaltyUsed > maxPenalty) return
             if (sb.length > maxLen) return
             if (bestPenaltyByYomi.size >= maxResults) return
@@ -754,6 +786,7 @@ class LOUDSWithTermId {
 
                 var childPos = firstChild(nodeIndex, succinctBitVector)
                 while (childPos >= 0 && LBS[childPos]) {
+                    if (operationCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                     val labelNodeId = succinctBitVector.rank1(childPos)
                     if (labelNodeId < labels.size && labels[labelNodeId] == cand.ch) {
                         sb.append(cand.ch)

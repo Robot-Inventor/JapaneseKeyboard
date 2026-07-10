@@ -5,13 +5,14 @@ import com.kazumaproject.graph.Node
 import com.kazumaproject.markdownhelperkeyboard.converter.mozc.MozcSegmenter
 import com.kazumaproject.markdownhelperkeyboard.converter.mozc.MozcSegmenterData
 import com.kazumaproject.markdownhelperkeyboard.converter.trace.PenaltyTrace
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class MozcPrefixSuffixPenaltyTest {
 
     @Test
-    fun appliesPrefixAndSuffixOnlyToEligibleNormalNodesAndDoesNotDoubleAdd() {
+    fun appliesPrefixAndSuffixOnlyToEligibleNormalNodesAndDoesNotDoubleAdd() = runBlocking {
         val graph = twoNodeGraph()
         val first = graph.getValue(1).single()
         val second = graph.getValue(2).single()
@@ -46,7 +47,7 @@ class MozcPrefixSuffixPenaltyTest {
     }
 
     @Test
-    fun leavesScoresUnchangedWhenMozcSegmenterIsDisabled() {
+    fun leavesScoresUnchangedWhenMozcSegmenterIsDisabled() = runBlocking {
         val graph = twoNodeGraph()
 
         FindPath().backwardAStarWithBunsetsu(

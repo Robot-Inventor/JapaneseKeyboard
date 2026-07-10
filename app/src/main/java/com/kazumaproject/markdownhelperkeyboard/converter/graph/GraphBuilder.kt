@@ -16,6 +16,8 @@ import com.kazumaproject.markdownhelperkeyboard.ime_service.extensions.isAllHalf
 import com.kazumaproject.markdownhelperkeyboard.repository.LearnRepository
 import com.kazumaproject.markdownhelperkeyboard.repository.UserDictionaryRepository
 import com.kazumaproject.markdownhelperkeyboard.user_dictionary.PosMapper
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 class GraphBuilder {
 
@@ -163,6 +165,7 @@ class GraphBuilder {
         graphNodeTrace: MutableList<GraphNodeTrace>? = null,
     ): MutableMap<Int, MutableList<Node>> {
         if (str.isAllHalfWidthAscii()) return mutableMapOf()
+        val cancellationContext = currentCoroutineContext()
         fun mozcAttributesFor(leftId: Short): Int =
             mozcNodeAttributeTable?.attributesFor(leftId.toInt()) ?: MozcNodeAttributes.NONE
 
@@ -183,6 +186,7 @@ class GraphBuilder {
             )
         )
         for (i in str.indices) {
+            cancellationContext.ensureActive()
             var subStrCache: String? = null
             fun subStr(): String {
                 val cached = subStrCache
@@ -194,7 +198,8 @@ class GraphBuilder {
             // 1. ユーザー辞書
             val userWords = userDictionaryRepository?.commonPrefixSearchInUserDict(subStr()) ?: emptyList()
             if (userWords.isNotEmpty()) foundInAnyDictionary = true
-            userWords.forEach { userWord ->
+            userWords.forEachIndexed { index, userWord ->
+                if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                 val endIndex = i + userWord.reading.length
                 val contextId = PosMapper.getContextIdForPos(userWord.posIndex)
                 val node = Node(
@@ -215,7 +220,8 @@ class GraphBuilder {
             // 2. 学習辞書
             val learnedWords = learnRepository?.findCommonPrefixes(subStr()) ?: emptyList()
             if (learnedWords.isNotEmpty()) foundInAnyDictionary = true
-            learnedWords.forEach { learnedWord ->
+            learnedWords.forEachIndexed { index, learnedWord ->
+                if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                 val endIndex = i + learnedWord.input.length
                 val node = Node(
                     l = learnedWord.leftId ?: 1851.toShort(),
@@ -255,6 +261,7 @@ class GraphBuilder {
                     succinctBitVector = localSystemUserLBSYomi,
                 )
                 if (systemUserPrefixSearch.isNotEmpty()) foundInAnyDictionary = true
+                var systemUserTokenCount = 0
                 for (prefixResult in systemUserPrefixSearch) {
                     val yomiStr = prefixResult.yomi
                     val nodeIndex = prefixResult.nodeIndex
@@ -265,6 +272,7 @@ class GraphBuilder {
                         termId,
                         localSystemUserTokenBitVector,
                     ) { posTableIndex, wordCost, tokenNodeId ->
+                        if (systemUserTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                         val tango = when (tokenNodeId) {
                             -2 -> yomiStr
                             -1 -> yomiStr.hiraToKata()
@@ -330,6 +338,7 @@ class GraphBuilder {
                         val endIndex = i + yomiStr.length
                         val penalty = typoCorrectionOffsetScore * typo.penaltyUsed
 
+                        cancellationContext.ensureActive()
                         listToken
                             .sortedBy { it.wordCost }
                             .take(5)
@@ -366,6 +375,7 @@ class GraphBuilder {
                                     "SYSTEM_USER_TYPO",
                                 )
                             }
+                        cancellationContext.ensureActive()
                     }
                 }
 
@@ -393,6 +403,7 @@ class GraphBuilder {
                         )
                         val endIndex = i + yomiStr.length
 
+                        cancellationContext.ensureActive()
                         listToken.sortedBy { it.wordCost }.take(5).forEach { token ->
                             val tango = when (token.nodeId) {
                                 -2 -> yomiStr
@@ -426,6 +437,7 @@ class GraphBuilder {
                                 "SYSTEM_USER_OMISSION",
                             )
                         }
+                        cancellationContext.ensureActive()
                     }
                 }
             }
@@ -437,6 +449,7 @@ class GraphBuilder {
                 succinctBitVector = succinctBitVectorLBSYomi
             )
             if (commonPrefixSearchSystem.isNotEmpty()) foundInAnyDictionary = true
+            var systemTokenCount = 0
             for (prefixResult in commonPrefixSearchSystem) {
                 val yomiStr = prefixResult.yomi
                 val nodeIndex = prefixResult.nodeIndex
@@ -447,6 +460,7 @@ class GraphBuilder {
                         termId,
                         succinctBitVectorTokenArray
                     ) { posTableIndex, wordCost, tokenNodeId ->
+                        if (systemTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                         val tango = when (tokenNodeId) {
                             -2 -> yomiStr
                             -1 -> yomiStr.hiraToKata()
@@ -502,6 +516,7 @@ class GraphBuilder {
                     val endIndex = i + yomiStr.length
                     val penalty = typoCorrectionOffsetScore * typo.penaltyUsed
 
+                    cancellationContext.ensureActive()
                     listToken
                         .sortedBy { it.wordCost }
                         .take(5)
@@ -535,6 +550,7 @@ class GraphBuilder {
                                 "SYSTEM_TYPO",
                             )
                         }
+                    cancellationContext.ensureActive()
                 }
             }
 
@@ -557,6 +573,7 @@ class GraphBuilder {
                             succinctBitVectorTokenArray
                         )
                         val endIndex = i + yomiStr.length
+                        cancellationContext.ensureActive()
                         listToken.sortedBy { it.wordCost }.take(5).forEach { token ->
                             val tango = when (token.nodeId) {
                                 -2 -> yomiStr
@@ -581,6 +598,7 @@ class GraphBuilder {
                             )
                             addOrUpdateNode(graph, endIndex, node, graphNodeDedupMode, graphNodeTrace, str, "SYSTEM_OMISSION")
                         }
+                        cancellationContext.ensureActive()
                     }
                 }
             }
@@ -596,6 +614,7 @@ class GraphBuilder {
                     succinctBitVector = succinctBitVectorLBSWikiYomi
                 )
                 if (commonPrefixSearchWiki.isNotEmpty()) foundInAnyDictionary = true
+                var wikiTokenCount = 0
                 for (prefixResult in commonPrefixSearchWiki) {
                     val yomiStr = prefixResult.yomi
                     val nodeIndex = prefixResult.nodeIndex
@@ -607,6 +626,7 @@ class GraphBuilder {
                             termId,
                             succinctBitVectorWikiTokenArray
                         ) { posTableIndex, wordCost, tokenNodeId ->
+                            if (wikiTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                             val tango = when (tokenNodeId) {
                                 -2 -> yomiStr
                                 -1 -> yomiStr.hiraToKata()
@@ -645,6 +665,7 @@ class GraphBuilder {
                     succinctBitVector = succinctBitVectorLBSwebYomi
                 )
                 if (commonPrefixSearchWeb.isNotEmpty()) foundInAnyDictionary = true
+                var webTokenCount = 0
                 for (prefixResult in commonPrefixSearchWeb) {
                     val yomiStr = prefixResult.yomi
                     val nodeIndex = prefixResult.nodeIndex
@@ -656,6 +677,7 @@ class GraphBuilder {
                             termId,
                             succinctBitVectorwebTokenArray
                         ) { posTableIndex, wordCost, tokenNodeId ->
+                            if (webTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                             val tango = when (tokenNodeId) {
                                 -2 -> yomiStr
                                 -1 -> yomiStr.hiraToKata()
@@ -694,6 +716,7 @@ class GraphBuilder {
                     succinctBitVector = succinctBitVectorLBSpersonYomi
                 )
                 if (commonPrefixSearchPerson.isNotEmpty()) foundInAnyDictionary = true
+                var personTokenCount = 0
                 for (prefixResult in commonPrefixSearchPerson) {
                     val yomiStr = prefixResult.yomi
                     val nodeIndex = prefixResult.nodeIndex
@@ -705,6 +728,7 @@ class GraphBuilder {
                             termId,
                             succinctBitVectorpersonTokenArray
                         ) { posTableIndex, wordCost, tokenNodeId ->
+                            if (personTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                             val tango = when (tokenNodeId) {
                                 -2 -> yomiStr
                                 -1 -> yomiStr.hiraToKata()
@@ -743,6 +767,7 @@ class GraphBuilder {
                     succinctBitVector = succinctBitVectorLBSneologdYomi
                 )
                 if (commonPrefixSearchNeologd.isNotEmpty()) foundInAnyDictionary = true
+                var neologdTokenCount = 0
                 for (prefixResult in commonPrefixSearchNeologd) {
                     val yomiStr = prefixResult.yomi
                     val nodeIndex = prefixResult.nodeIndex
@@ -754,6 +779,7 @@ class GraphBuilder {
                             termId,
                             succinctBitVectorneologdTokenArray
                         ) { posTableIndex, wordCost, tokenNodeId ->
+                            if (neologdTokenCount++ % CANCELLATION_CHECK_INTERVAL == 0) cancellationContext.ensureActive()
                             val tango = when (tokenNodeId) {
                                 -2 -> yomiStr
                                 -1 -> yomiStr.hiraToKata()
@@ -803,5 +829,9 @@ class GraphBuilder {
             }
         }
         return graph
+    }
+
+    private companion object {
+        const val CANCELLATION_CHECK_INTERVAL = 64
     }
 }

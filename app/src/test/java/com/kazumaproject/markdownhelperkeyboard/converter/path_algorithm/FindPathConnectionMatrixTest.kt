@@ -1,13 +1,14 @@
 package com.kazumaproject.markdownhelperkeyboard.converter.path_algorithm
 
 import com.kazumaproject.graph.Node
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class FindPathConnectionMatrixTest {
 
     @Test
-    fun backwardAStar_usesPassed2672ConnectionMatrixWidth() {
+    fun backwardAStar_usesPassed2672ConnectionMatrixWidth() = runBlocking {
         val connectionIds = ShortArray(2672 * 2672)
         connectionIds[1 * 2672 + 0] = (-123).toShort()
         connectionIds[1 * 2670 + 0] = 456.toShort()
@@ -26,7 +27,7 @@ class FindPathConnectionMatrixTest {
     }
 
     @Test
-    fun backwardAStar_usesBuiltIn2670ConnectionMatrixWidth() {
+    fun backwardAStar_usesBuiltIn2670ConnectionMatrixWidth() = runBlocking {
         val matrixSize = 2670
         val connectionIds = ShortArray(matrixSize * matrixSize)
         connectionIds[1 * matrixSize + 0] = (-70).toShort()
